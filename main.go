@@ -12,11 +12,11 @@ import (
 )
 
 type Directory struct {
-	Path string `json:"path"`
-	Name string `json:"name"`
+	Path        string       `json:"path"`
+	Name        string       `json:"name"`
 	Directories []*Directory `json:"directories"`
-	Files []*File `json:"files"`
-	Open bool `json:"open"`
+	Files       []*File      `json:"files"`
+	Open        bool         `json:"open"`
 }
 
 type File struct {
@@ -25,12 +25,35 @@ type File struct {
 	Code string `json:"code"`
 }
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func (r *http.Request) bool {
-		return true
-	},
+// Websocket connection
+var conn *websocket.Conn
+
+func main() {
+	// Start listener
+	go startWebsocket()
+
+	// Configure the root directory
+	rootDirPath := os.Args[1] // provide the path in the first argument when starting the watcher
+	rootDirName := os.Args[2] // provide the name of the root directory as the second argument, when starting the watcher
+	rootDir := Directory{
+		Name:        rootDirName,
+		Path:        rootDirPath,
+		Directories: make([]*Directory, 0),
+		Files:       make([]*File, 0),
+		Open:        false,
+	}
+
+	// Read the files in the root directory
+	files, err := ioutil.ReadDir(rootDirPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// After this point, the rootDir variable contains all files and directories in this folder
+	readFiles(&rootDir, files)
+
+	// Now watch for changes
+	startWatcher(&rootDir)
 }
 
 func readFiles(dir *Directory, files []os.FileInfo) {
@@ -39,12 +62,12 @@ func readFiles(dir *Directory, files []os.FileInfo) {
 		if !file.IsDir() {
 			fileContent, err := ioutil.ReadFile(dir.Path + "/" + file.Name())
 
-			if  err != nil {
+			if err != nil {
 				log.Printf("could not read the file content: %+v", err)
 				return
 			}
 
-			dir.Files = append(dir.Files, &File {
+			dir.Files = append(dir.Files, &File{
 				Name: file.Name(),
 				Path: dir.Path + "/" + file.Name(),
 				Code: string(fileContent),
@@ -54,16 +77,17 @@ func readFiles(dir *Directory, files []os.FileInfo) {
 
 		// Directory found
 		if file.IsDir() {
-			dir.Directories = append(dir.Directories, &Directory {
-				Name: file.Name(),
-				Path: dir.Path + "/" + file.Name(),
+			dir.Directories = append(dir.Directories, &Directory{
+				Name:        file.Name(),
+				Path:        dir.Path + "/" + file.Name(),
 				Directories: make([]*Directory, 0),
-				Files: make([]*File, 0),
-				Open: false,
+				Files:       make([]*File, 0),
+				Open:        false,
 			})
 		}
 	}
 
+	// Loop through the found directories and recursively read their files
 	for _, subDir := range dir.Directories {
 		subDirFiles, err := ioutil.ReadDir(subDir.Path)
 		if err != nil {
@@ -73,7 +97,6 @@ func readFiles(dir *Directory, files []os.FileInfo) {
 		readFiles(subDir, subDirFiles)
 	}
 }
-
 
 func swapDirectory(rootDir *Directory, changedDir *Directory) {
 	lookForPath := changedDir.Path
@@ -104,11 +127,18 @@ func swapDirectory(rootDir *Directory, changedDir *Directory) {
 	}
 }
 
-func main () {
+func startWebsocket() {
 	var err error
-	var conn *websocket.Conn
 
-	http.HandleFunc("/", func (w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		conn, err = upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Println(err)
@@ -117,56 +147,40 @@ func main () {
 	})
 
 	go http.ListenAndServe(":3600", nil)
+}
 
-	rootDirPath := "."
+func startWatcher(rootDir *Directory) {
+	var err error
 
-	rootDir := &Directory {
-		Name: "bigbrother",
-		Path: rootDirPath,
-		Directories: make([]*Directory, 0),
-		Files: make([]*File, 0),
-		Open: false,
-	}
-
-	files, err := ioutil.ReadDir(rootDirPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// After this point, rootDir contains all files and directories in this folder
-	readFiles(rootDir, files)
-
-	// Initialize the watcher
 	w := watcher.New()
-
-	// Maximum one event per cycle of 100 ms
-	w.SetMaxEvents(1)
+	w.SetMaxEvents(1) // Maximum one event per cycle of 100 ms
 
 	go func() {
 		for {
 			select {
 			case event := <-w.Event:
 				if event.IsDir() {
-					if !strings.Contains(event.Path, "bigbrother/") {
-						if conn != nil {
-							err = conn.WriteJSON(rootDir)
+					if conn == nil {
+						log.Printf("there's no websocket connection right now")
+						continue
+					}
 
-							if err != nil {
-								log.Fatalf("couldn't notify the websocket of changes: %+v", err)
-							}
+					if !strings.Contains(event.Path, rootDir.Name) {
+						err = conn.WriteJSON(rootDir)
+						if err != nil {
+							log.Printf("couldn't notify the websocket of changes: %+v", err)
 						}
-
 					} else {
-						relativePath := event.Path[strings.Index(event.Path, "bigbrother/")+11:]
+						relativePath := event.Path[strings.Index(event.Path, rootDir.Name+"/")+len(rootDir.Name)+1:]
+						log.Printf("relative path: %+v", relativePath)
 
-						changedDir := &Directory {
-							Path: relativePath,
-							Name: event.Name(),
+						changedDir := &Directory{
+							Path:        relativePath,
+							Name:        event.Name(),
 							Directories: make([]*Directory, 0),
-							Files: make([]*File, 0),
-							Open: false,
+							Files:       make([]*File, 0),
+							Open:        false,
 						}
-
 
 						files, err := ioutil.ReadDir(relativePath)
 
@@ -177,16 +191,14 @@ func main () {
 						readFiles(changedDir, files)
 
 						if changedDir.Path != rootDir.Path {
-							swapDirectory(rootDir, changedDir)
+							swapDirectory(rootDir, changedDir) // swap out the updated directory
 						}
 
-						if conn != nil {
-							err = conn.WriteJSON(rootDir)
-
-							if err != nil {
-								log.Fatalf("couldn't notify the websocket of changes: %+v", err)
-							}
+						err = conn.WriteJSON(rootDir)
+						if err != nil {
+							log.Fatalf("couldn't notify the websocket of changes: %+v", err)
 						}
+
 					}
 				}
 
@@ -198,8 +210,8 @@ func main () {
 		}
 	}()
 
-	// Watch test_folder recursively for changes.
-	if err := w.AddRecursive("."); err != nil {
+	// Watch rootDir recursively for changes.
+	if err := w.AddRecursive(rootDir.Path); err != nil {
 		log.Fatalln(err)
 	}
 

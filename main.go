@@ -170,35 +170,43 @@ func startWatcher(rootDir *Directory) {
 						if err != nil {
 							log.Printf("couldn't notify the websocket of changes: %+v", err)
 						}
+						continue
+					}
+
+					// Default: The rootDir itself changed
+					relativePath := rootDir.Path
+
+					// rootDir itself didn't change
+					eventDirs := strings.Split(relativePath, "/")
+					if eventDirs[len(eventDirs)-1] != rootDir.Path {
+						relativePath = event.Path[strings.Index(event.Path, rootDir.Name+"/")+len(rootDir.Name)+1:]
+					}
+
+					changedDir := &Directory{
+						Path:        relativePath,
+						Name:        event.Name(),
+						Directories: make([]*Directory, 0),
+						Files:       make([]*File, 0),
+						Open:        false,
+					}
+
+					files, err := ioutil.ReadDir(relativePath)
+
+					if err != nil {
+						log.Fatalf("couldn't read files in relative path: %+v", err)
+					}
+
+					readFiles(changedDir, files)
+
+					if changedDir.Path != rootDir.Path {
+						swapDirectory(rootDir, changedDir) // swap out the updated directory
 					} else {
-						relativePath := event.Path[strings.Index(event.Path, rootDir.Name+"/")+len(rootDir.Name)+1:]
-						log.Printf("relative path: %+v", relativePath)
+						rootDir = changedDir
+					}
 
-						changedDir := &Directory{
-							Path:        relativePath,
-							Name:        event.Name(),
-							Directories: make([]*Directory, 0),
-							Files:       make([]*File, 0),
-							Open:        false,
-						}
-
-						files, err := ioutil.ReadDir(relativePath)
-
-						if err != nil {
-							log.Fatalf("couldn't read files in relative path: %+v", err)
-						}
-
-						readFiles(changedDir, files)
-
-						if changedDir.Path != rootDir.Path {
-							swapDirectory(rootDir, changedDir) // swap out the updated directory
-						}
-
-						err = conn.WriteJSON(rootDir)
-						if err != nil {
-							log.Fatalf("couldn't notify the websocket of changes: %+v", err)
-						}
-
+					err = conn.WriteJSON(rootDir)
+					if err != nil {
+						log.Fatalf("couldn't notify the websocket of changes: %+v", err)
 					}
 				}
 
